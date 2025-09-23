@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36401.2
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "kind-of-stop-spam", "kind-of-stop-spam\kind-of-stop-spam.csproj", "{95EBDADF-323A-442F-9A8F-E2AB4A0EB0DA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "KindOfStopSpam.Tests", "kind-of-stop-spam-test\KindOfStopSpam.Tests.csproj", "{B2C53C72-DFF3-32D8-F4DB-E0D24AA8939A}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{95EBDADF-323A-442F-9A8F-E2AB4A0EB0DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{95EBDADF-323A-442F-9A8F-E2AB4A0EB0DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{95EBDADF-323A-442F-9A8F-E2AB4A0EB0DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{95EBDADF-323A-442F-9A8F-E2AB4A0EB0DA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2C53C72-DFF3-32D8-F4DB-E0D24AA8939A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2C53C72-DFF3-32D8-F4DB-E0D24AA8939A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2C53C72-DFF3-32D8-F4DB-E0D24AA8939A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2C53C72-DFF3-32D8-F4DB-E0D24AA8939A}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D75C411D-303B-496F-BF7F-894C43C549BA}
+	EndGlobalSection
+EndGlobal
