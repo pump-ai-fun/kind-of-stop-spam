@@ -14,6 +14,8 @@ namespace kind_of_stop_spam
         public string Content { get; init; } = string.Empty;
         public DateTimeOffset ReceivedAt { get; init; }
         public string? RawTime { get; init; } // e.g., "19:10" from source
+        public string? ReplyTo { get; init; } // Optional: text snippet or username being replied to
+        public string? HighlightColor { get; init; } // Optional: user-selected color via !color command
     }
 
     /// <summary>
@@ -35,6 +37,11 @@ namespace kind_of_stop_spam
 
         // perf: reuse regex
         private static readonly Regex _multiWhitespace = new(@"\s+", RegexOptions.Compiled);
+        private static readonly Regex _colorCmdRegex = new(@"#([0-9A-Fa-f]{3,8})", RegexOptions.Compiled);
+        private static readonly HashSet<string> _allowedColorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "red","blue","green","orange","purple","cyan","magenta","yellow","lime","teal","pink","violet","indigo","black","white","gray","grey","silver","gold","brown","maroon","navy","olive","aqua","fuchsia","coral","crimson","tomato","salmon","khaki","plum","orchid","turquoise","skyblue","deeppink","dodgerblue","rebeccapurple"
+        };
 
         public SpamFilter(TimeSpan? perUserWindow = null, TimeSpan? dedupTtl = null, ChatFilterConfig? config = null)
         {
@@ -51,6 +58,15 @@ namespace kind_of_stop_spam
         /// </summary>
         public bool TryAcceptRaw(string raw, out ChatMessage kept)
         {
+            // Back-compat overload: no reply info
+            return TryAcceptRaw(raw, replyTo: null, out kept);
+        }
+
+        /// <summary>
+        /// Overload that accepts an optional replyTo snippet/username for the message.
+        /// </summary>
+        public bool TryAcceptRaw(string raw, string? replyTo, out ChatMessage kept)
+        {
             var now = DateTimeOffset.UtcNow;
             kept = new ChatMessage { User = string.Empty, Content = string.Empty, ReceivedAt = now };
 
@@ -65,10 +81,16 @@ namespace kind_of_stop_spam
                 if (parts.Length >= 3) timeStr = parts[2].Trim();
             }
 
-            if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(content))
+            var originalContent = content;
+
+            if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(originalContent))
                 return false; // malformed
 
-            // Normalize content for dedup and keyword checks
+            // Extract optional color command and strip it from displayed content
+            string? highlightColor = null;
+            content = StripAndExtractColor(originalContent, out highlightColor);
+
+            // Normalize content for dedup and keyword checks (use stripped content)
             var normalized = NormalizeContent(content);
 
             // Config-based bans (keywords or mentions); if matched, drop
@@ -112,18 +134,62 @@ namespace kind_of_stop_spam
             kept = new ChatMessage
             {
                 User = user,
-                Content = content,           // keep original text (normalized used only for dedup key)
+                Content = content,           // command stripped from display content
                 ReceivedAt = now,
-                RawTime = timeStr
+                RawTime = timeStr,
+                ReplyTo = string.IsNullOrWhiteSpace(replyTo) ? null : replyTo,
+                HighlightColor = highlightColor
             };
             return true;
         }
 
         // --- helpers ---
 
+        private static string StripAndExtractColor(string content, out string? color)
+        {
+            color = null;
+            // Find first color command token
+            var match = _colorCmdRegex.Match(content);
+            if (!match.Success)
+                return content;
+
+            var token = match.Groups[1].Value; // either #hex or name
+            if (!string.IsNullOrEmpty(token))//IsAllowedColor(token))
+            {
+                color = token.StartsWith('#') ? token : token.ToLowerInvariant();
+                // Remove the matched token including leading '!'
+
+                var stripped = _colorCmdRegex.Replace(content, " ", 1);
+                // Normalize leftover whitespace
+                stripped = _multiWhitespace.Replace(stripped, " ").Trim();
+                return stripped;
+            }
+            return content;
+        }
+
+        private static bool IsAllowedColor(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token)) return false;
+            if (token.StartsWith('#'))
+            {
+                var hex = token.AsSpan(1);
+                if (hex.Length is 3 or 6)
+                {
+                    for (int i = 0; i < hex.Length; i++)
+                    {
+                        char c = hex[i];
+                        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                        if (!ok) return false;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            return _allowedColorNames.Contains(token);
+        }
+
         private static string NormalizeContent(string s)
         {
-            // Lowercase + collapse whitespace + trim. You can add more rules (strip emojis/URLs/etc.) if desired.
             s = s.Trim();
             s = _multiWhitespace.Replace(s, " ");
             s = s.ToLowerInvariant();

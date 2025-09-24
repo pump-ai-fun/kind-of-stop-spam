@@ -12,6 +12,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="chat-filter-cfg.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Update="sessions.data">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
