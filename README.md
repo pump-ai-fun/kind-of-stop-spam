@@ -4,8 +4,9 @@
 
 Spammers are out of control, and this project is built for the community, by the community, to take back control of our chats.
 It started as a "kind of stop spam" approach, and it evolved to a foundation of a fully local chat moderation system.
+Total vibe coding.
 
-> Modatrix CA on Pump.Fun is ""
+> Modatrix CA on Pump.Fun is "H27BM5y9rjrFbnq3zBkfKGjdM36cHb5cPfJvQS2Mpump"
 
 Tame your livestream chat when Pump.fun energy goes orbital. This tool opens the coin page in a real browser, watches the live chat, filters out the spammy noise, and mirrors only the good stuff into a friendly, auto-refreshing HTML page you can drop into OBS or a second monitor. Think of it as noise-cancelling headphones for memes, while still vibing with the Pump.fun community (we love you, you glorious degen astronauts).
 
@@ -13,7 +14,7 @@ The filter scans incoming chat logs, removes repetitive spam, and outputs a clea
 
 | ✨ Information | 🧾 Animation |
 |---------|---------|
-| 🚫 Filters spam, duplicate messages, and repetitive noise. <br> 👤 Keeps only relevant, user-friendly chat messages. <br> 📂 Outputs to a local HTML file for easy OBS overlay. <br> ⚡ Lightweight, fast, and streaming-friendly. <br> 🤝 Community-driven solution for chat moderation. <br><br> 🔸 Per-user rate limiting (default: 1 message per 2s) to chill rapid-fire floods. <br> 🔸 Content deduplication (default: 3-minute TTL) across all users to stop copy/paste storms. <br> 🔸 Keyword and mention bans via a simple JSON file (substring and case-insensitive). <br> 🔸 Clean, local HTML mirror connected to OBS (as you can see in this stream). <br> 🔸 Open source, no sub needed. | ![Demo GIF](./animated-char.gif)
+| 🚫 Filters spam, duplicate messages, and repetitive noise. <br> 👤 Keeps only relevant, user-friendly chat messages. <br> 📂 Outputs to a local HTML file for easy OBS overlay. <br> ⚡ Lightweight, fast, and streaming-friendly. <br> 🤝 Community-driven solution for chat moderation. <br><br> 🔸 Per-user rate limiting (default: 1 message per 2s) to chill rapid-fire floods. <br> 🔸 Content deduplication (default: 3-minute TTL) across all users to stop copy/paste storms. <br> 🔸 Keyword and mention bans via a simple JSON file (substring and case-insensitive). <br> 🔸 Clean, local HTML mirror connected to OBS (as you can see in this stream). | ![Demo GIF](./animated-char.gif)
 
 ## How it helps streamers
 - Keep the chat on-screen readable and hype, not hijacked by copy-paste brigades.
