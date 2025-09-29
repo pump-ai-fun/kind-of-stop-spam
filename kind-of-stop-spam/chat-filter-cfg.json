@@ -1,4 +1,5 @@
 {
   "BannedKeywords": [ "fukk" ],
-  "BannedMentions": [ "@badguy", "@spammer", "@rugdefs", "@fightrugs" ]
+  "BannedMentions": [ "@badguy", "@spammer", "@rugdefs", "@fightrugs" ],
+  "WalletIcons": { "@code-a": "🔥" }
 }

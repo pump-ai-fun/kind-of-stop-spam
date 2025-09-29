@@ -2,145 +2,180 @@
 using Microsoft.Playwright;
 using System;
 using System.IO;
-using System.Runtime.Intrinsics.Arm;
 using System.Text.RegularExpressions;
 
-/// <summary>
-/// PumpFunTool: opens a Pump.fun coin page, extracts live chat messages,
-/// filters them using SpamFilter + ChatFilterConfig, and writes a live HTML view of kept messages.
-///
-/// Usage:
-///   PumpFunTool <token_address> [path-to-config-json]
-///
-/// Notes:
-/// - Optional config JSON (chat-filter-cfg.json by default when omitted) supports banned keywords/mentions.
-/// - Press any key in the console to stop.
-/// - Output HTML: ./filtered-chat.html (auto-refresh, optional auto-scroll toggle)
-/// </summary>
+// --------------------------------------------------------------------------------------
+// PumpFunTool
+// Opens a Pump.fun coin page, captures live chat messages, filters them (keywords, rate
+// limit, dedup) and writes accepted messages to filtered-chat.html for use in overlays.
+// --------------------------------------------------------------------------------------
+// Usage:
+//   PumpFunTool <token_address> [path-to-config-json]
+// Notes:
+//   * Optional config JSON (chat-filter-cfg.json when omitted) defines banned keywords,
+//     mentions and wallet->icon mappings.
+//   * Press any key in the console window to stop.
+//   * Output file: ./filtered-chat.html (includes auto-refresh + toggles at bottom).
+//   * First pass (historical backlog) is relaxed and only applies banned-word checks so
+//     you get context quickly; subsequent passes use strict live mode.
+// --------------------------------------------------------------------------------------
 class Program
 {
+    // Maximum number of most recent DOM messages examined per polling iteration.
+    private const int MaxMessagesPerScan = 23;
+
     static async Task Main(string[] args)
     {
-        // 1) Parse command line arguments for live mode
-        if (args.Length < 1 || args.Length > 2)
+        // Step 1: Parse & validate arguments
+        if (args.Length is < 1 or > 2)
         {
             Console.WriteLine("Usage: PumpFunTool <token_address> [path-to-config-json]");
-            Environment.Exit(1);
+            return;
         }
         string tokenAddress = args[0];
         string? configPath = args.Length == 2 ? args[1] : "./chat-filter-cfg.json";
 
-        var pattern = @"^[1-9A-HJ-NP-Za-km-z]{20,50}pump$"; // Example: 2McSmYfSEKUMQEq4JZbb9wq2SeyLrxkd9831EB9Vpump
+        // Basic token sanity check (trim early to avoid needless Playwright startup)
+        var pattern = @"^[1-9A-HJ-NP-Za-km-z]{20,50}pump$";
         if (!Regex.IsMatch(tokenAddress, pattern))
         {
             Console.WriteLine("Error: Invalid PumpFun token address format.");
-            Environment.Exit(1);
+            return;
         }
 
-        // 2) Initialize Playwright and open browser
+        // Step 2: Initialize Playwright (one lifetime scope)
         using var playwright = await Playwright.CreateAsync();
-        
 
-        // Open the local filtered HTML view in a separate tab for convenience
-        var chatPage = await SetupChatPage(playwright);
+        // Step 3: Create pages (viewer + source)
+        var chatPage = await SetupChatPage(playwright);       // local filtered view
+        var streamPage = await SetupStreamPage(playwright, tokenAddress); // live site
 
-        // Open the Pump.fun live chat page
-        var streamPage = await SetupStreamPage(playwright, tokenAddress);
-
-        // 3) Instantiate filter(s)
+        // Step 4: Load configuration & instantiate filter
         var cfg = ChatFilterConfig.LoadOrDefault(configPath);
         var filter = new SpamFilter(
             perUserWindow: TimeSpan.FromSeconds(2),
             dedupTtl: TimeSpan.FromMinutes(3),
-            config: cfg
-        );
+            config: cfg);
 
-        // View that auto-refreshes and can auto-scroll to show filtered-only messages
-        using var view = new HtmlFileChatView(filePath: "./filtered-chat.html", capacity: 500, title: $"Filtered Chat - {tokenAddress}");
+        // Step 5: Create HTML output view (slightly above scan window so we keep a buffer)
+        using var view = new HtmlFileChatView(
+            filePath: "./filtered-chat.html",
+            capacity: MaxMessagesPerScan + 5,
+            title: $"Filtered Chat - {tokenAddress}");
 
-        // 4) Wait for chat to be visible and trim the page for performance
+        // Step 6: Prepare chat DOM (mute, trim heavy panels)
         await LoadChat(streamPage);
 
-        // 5) Loop: collect, filter and render
-        Dictionary<string, bool> ParsedMsgs = new(); // true if aproved by filter
+        // Phase tracking
+        bool historicalPhase = true;              // relaxed first sweep
+        var historicalIds = new HashSet<string>();
+        var liveIds = new HashSet<string>();
+
+        // Step 7: Poll loop (ESC style key-stop simplified to any key press)
         while (true)
         {
-            if (Console.KeyAvailable) // detects key press
+            if (Console.KeyAvailable)
             {
-                Console.ReadKey(intercept: true); // consume the key
+                Console.ReadKey(intercept: true);
                 break;
             }
 
-            ILocator allMessages = null;
-            int allMessagesCount = 0;
+            ILocator allMessages;
+            int allMessagesCount;
             try
             {
-                // Traverse all messages (limit to the last 1000 for performance)
                 allMessages = streamPage.Locator("div[data-message-id]");
                 allMessagesCount = await allMessages.CountAsync();
 
                 if (allMessagesCount == 0)
                 {
-                    if ((await streamPage.ContentAsync()).Contains("Application error: a client-side exception"))
-                    {
-                        throw new Exception("Pump.fun application error detected, reloading the page.");
-                    }
+                    var html = await streamPage.ContentAsync();
+                    if (html.Contains("Application error: a client-side exception", StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("Pump.fun client-side exception detected – reloading page.");
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                Console.WriteLine($"[Warn] Page issue detected – attempting reload. Detail: {ex.Message}");
                 await streamPage.ReloadAsync();
                 await LoadChat(streamPage);
                 continue;
             }
 
-            int startAt = Math.Max(1, allMessagesCount - 1000);
-            for (int m = startAt; m < allMessagesCount; m++)
+            if (allMessagesCount == 0)
+            {
+                await Task.Delay(250);
+                continue;
+            }
+
+            int startAt = Math.Max(0, allMessagesCount - MaxMessagesPerScan);
+            for (int idx = startAt; idx < allMessagesCount; idx++)
             {
                 try
                 {
-                    var message = allMessages.Nth(m);
-                    // Use the full element text so SpamFilter parsing (user\n\ncontent\n\ntime) remains intact
-                    var messageContent = await message.InnerTextAsync(new LocatorInnerTextOptions { Timeout = 2000 });
-                    if (ParsedMsgs.ContainsKey(messageContent))
+                    var node = allMessages.Nth(idx);
+                    string? msgId = await node.GetAttributeAsync("data-message-id");
+                    if (string.IsNullOrEmpty(msgId)) continue;
+
+                    if (historicalPhase)
                     {
-                        continue; // already processed
+                        if (!historicalIds.Add(msgId))
+                            continue; // already processed in relaxed mode
                     }
                     else
                     {
-                        ParsedMsgs.Add(messageContent, false); // mark as processed (default to not accepted)
+                        if (liveIds.Contains(msgId))
+                            continue; // already emitted
                     }
-                    // Detect and handle messages replying to something
+
+                    // Full block text (user\n\ncontent\n\nclockTime)
+                    var rawBlock = await node.InnerTextAsync(new LocatorInnerTextOptions { Timeout = 2000 });
+
+                    // Reply snippet extraction (if structure present)
                     string? replyingTo = null;
                     try
                     {
-                        var replySpans = message.Locator("span.leading-snug");
-                        var count = await replySpans.CountAsync();
-                        if (count > 0)
+                        var replySpans = node.Locator("span.leading-snug");
+                        var rc = await replySpans.CountAsync();
+                        if (rc > 0)
                         {
-                            replyingTo = await replySpans.Nth(count - 1).InnerTextAsync();
-                            messageContent = messageContent.Substring(messageContent.IndexOf("\n") + 1);
+                            replyingTo = await replySpans.Nth(rc - 1).InnerTextAsync();
+                            var firstBreak = rawBlock.IndexOf('\n');
+                            if (firstBreak > 0 && firstBreak + 1 < rawBlock.Length)
+                                rawBlock = rawBlock[(firstBreak + 1)..];
                         }
                     }
                     catch { replyingTo = null; }
 
-                    if (filter.TryAcceptRaw(messageContent, replyingTo, out var msg))
+                    var mode = historicalPhase ? SpamFilter.Mode.Historical : SpamFilter.Mode.Live;
+                    if (filter.TryAcceptRaw(rawBlock, replyingTo, mode, out var accepted))
                     {
-                        ParsedMsgs[messageContent] = true; // mark as accepted
-                        view.Add(msg);
+                        if (!historicalPhase)
+                            liveIds.Add(msgId);
+                        view.Add(accepted);
                     }
                 }
                 catch
                 {
-                    // Ignore transient DOM issues (detached nodes, timeouts) and continue
+                    // Ignore transient DOM / timing issues for individual messages
                     continue;
                 }
             }
 
-            System.Threading.Thread.Sleep(250); // Avoid busy loop
+            if (historicalPhase)
+            {
+                historicalPhase = false;
+                historicalIds.Clear();
+                Console.WriteLine("[Info] Historical backlog ingested. Switching to strict live filtering.");
+            }
+
+            await Task.Delay(150);
         }
     }
 
+    /// <summary>
+    /// Ensure chat container is present, mute video/audio and remove heavy non-chat sections.
+    /// </summary>
     public static async Task LoadChat(IPage page)
     {
         try
@@ -148,16 +183,19 @@ class Program
             var chatArea = page.Locator("div:has-text('live chat'):has(div[data-message-id])").First;
             await chatArea.WaitForAsync();
             await DomHelpers.EnsureVideoMutedAndStoppedAsync(page.Locator("video"));
-            await page.Context.StorageStateAsync(new() { Path = "./sessions.data" }); // keep session updated
-            await DomHelpers.RemoveElementAsync(page.Locator("#coin-content-container")); // keep only chat
+            await page.Context.StorageStateAsync(new() { Path = "./sessions.data" });
+            await DomHelpers.RemoveElementAsync(page.Locator("#coin-content-container"));
         }
         catch (Exception)
         {
-            Console.WriteLine("Error: Timeout waiting for chat area to load. Is the token address correct? Are you signed in?");
+            Console.WriteLine("Error: Timeout waiting for chat area. Check token address and login state.");
             Environment.Exit(1);
         }
     }
 
+    /// <summary>
+    /// Create the local viewer page hosting filtered-chat.html.
+    /// </summary>
     public static async Task<IPage> SetupChatPage(IPlaywright playwright)
     {
         var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
@@ -166,33 +204,23 @@ class Program
             Headless = false,
             Args = new[] { "--disable-blink-features=AutomationControlled", "--mute-audio", "--window-size=600,1000" }
         });
-        var browserContext = await browser.NewContextAsync(new BrowserNewContextOptions()
+        var context = await browser.NewContextAsync(new BrowserNewContextOptions
         {
             ViewportSize = ViewportSize.NoViewport,
             StorageStatePath = "./sessions.data",
             UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         });
-
-        // Open the local filtered HTML view in a separate tab for convenience
-        var chatPage = await browserContext.NewPageAsync();
-        string chatHtmlFile = Path.GetFullPath("./filtered-chat.html");
-        await chatPage.GotoAsync($"file:///{chatHtmlFile.Replace("\\", "/")}");
-        chatPage.PageError += (_, error) =>
-        {
-            Console.WriteLine($"[Page Error] {error}");
-        };
-        chatPage.RequestFailed += async (_, request) =>
-        {
-            try
-            {
-                await chatPage.GotoAsync($"file:///{chatHtmlFile.Replace("\\", "/")}");
-            }
-            catch { /*ignore*/ }
-        };
-
-        return chatPage;
+        var page = await context.NewPageAsync();
+        string htmlPath = Path.GetFullPath("./filtered-chat.html");
+        await page.GotoAsync($"file:///{htmlPath.Replace("\\", "/")}");
+        page.PageError += (_, error) => Console.WriteLine($"[Page Error] {error}");
+        page.RequestFailed += async (_, __) => { try { await page.GotoAsync($"file:///{htmlPath.Replace("\\", "/")}"); } catch { } };
+        return page;
     }
 
+    /// <summary>
+    /// Create the scraping page pointed at the Pump.fun coin URL.
+    /// </summary>
     public static async Task<IPage> SetupStreamPage(IPlaywright playwright, string tokenAddress)
     {
         var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
@@ -201,15 +229,14 @@ class Program
             Headless = false,
             Args = new[] { "--disable-blink-features=AutomationControlled", "--mute-audio" }
         });
-        var browserContext = await browser.NewContextAsync(new BrowserNewContextOptions()
+        var context = await browser.NewContextAsync(new BrowserNewContextOptions
         {
-            ViewportSize = null, // allows window resize to affect page size
+            ViewportSize = null, // allow manual resize
             StorageStatePath = "./sessions.data",
             UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         });
-
-        var streamPage = await browserContext.NewPageAsync();
-        await streamPage.GotoAsync($"https://pump.fun/coin/{tokenAddress}");
-        return streamPage;
+        var page = await context.NewPageAsync();
+        await page.GotoAsync($"https://pump.fun/coin/{tokenAddress}");
+        return page;
     }
 }

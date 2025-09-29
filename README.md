@@ -72,3 +72,109 @@ Matching is substring-based and case-insensitive after whitespace is collapsed. 
 
 ## Shout-out
 The Pump.fun community is a rocket—this keeps chat readable while you moon. Good vibes, good memes, and only the best chaos make the cut. 🚀🧪
+
+# PumpFunTool (Filtered Chat Overlay)
+
+A Playwright-based tool that opens a Pump.fun coin page, extracts live chat messages, filters them (banned words, rate limits, deduplication), and renders a local auto-updating HTML overlay containing only accepted messages.
+
+## Usage
+```
+PumpFunTool <token_address> [path-to-config-json]
+```
+Default config file (if not supplied): `chat-filter-cfg.json`.
+
+Example token format (validated): `2McSmYfSEKUMQEq4JZbb9wq2SeyLrxkd9831EB9Vpump`
+
+## Features
+- Live extraction of Pump.fun chat via Playwright (Edge/Chromium)
+- Initial relaxed "historical" pass (last N messages) then strict live filtering
+- Per-user rate limiting & duplicate suppression (live phase)
+- Configurable banned keywords & mentions via JSON
+- Wallet tag → icon mapping (emotes) from config
+- Automatic HTML overlay (`filtered-chat.html`) with:
+  - Auto-refresh (toggleable, 1s interval) & auto-scroll toggle
+  - Gradient / solid highlight background via inline hex codes (#abc, #aabbcc)
+  - Reply detection + inline display of replied snippet
+  - Message animation commands (see below)
+
+## Chat Command Effects
+Add one or more commands (space separated) anywhere in a message. They are removed from the displayed text and converted into CSS/JS driven effects. Multiple may stack.
+
+| Command | Effect |
+|---------|--------|
+| `!shake` | Quick intense shake + flash pulse (legacy) |
+| `!wiggle` | Slow horizontal wiggle (worm-like) |
+| `!glow` | Neon cyan pulsing text glow (strong multi-layer text-shadow) |
+| `!wave` | Characters move in a looping vertical wave (per-character stagger) |
+| `!scramble` | Characters rapidly jumble through random glyphs then settle |
+| `!type` | Text reappears with a type/reveal effect |
+| `!glitch` | One-shot RGB split + jitter glitch burst |
+| `!explode` | Characters radiate outward and fade (one-shot) |
+| `!matrix` | Continuous green digital rain fall effect per character |
+| `!fade` | Fade out then back in |
+| `!slide` | Slide in from left with overshoot settle |
+
+Example:  
+```
+Hyped for launch! !glow !wave
+```
+
+### Color Highlights
+Include up to two hex colors in the message body (e.g. `#ff8800 #2200ff`) to produce a gradient background. A single color gives a solid highlight. Colors are stripped from final text.
+
+### Replies
+If Pump.fun formats a message as a reply, the referenced snippet is captured and shown in a smaller reply panel above the message content.
+
+## Filtering Phases
+| Phase | Dedup | Rate Limit | Banned Words | Purpose |
+|-------|-------|------------|--------------|---------|
+| Historical | No | No | Yes | Show recent backlog for context |
+| Live | Yes | Yes | Yes | Maintain clean real-time feed |
+
+## Config (`chat-filter-cfg.json`)
+```json
+{
+  "BannedKeywords": ["scam"],
+  "BannedMentions": ["@annoyinguser"],
+  "WalletIcons": { "@coolwhale": "🐳", "@hq3xqa": "🔥" }
+}
+```
+All matching is case-insensitive; input normalized internally.
+
+## Build & Run
+```
+dotnet build
+dotnet run --project kind-of-stop-spam <token> [config]
+```
+
+## Generated Artifacts
+| File | Purpose |
+|------|---------|
+| `filtered-chat.html` | Live overlay page | 
+| `sessions.data` | Playwright storage state (login/session reuse) |
+
+## Overlay Controls
+Bottom toolbar:
+- Auto-scroll checkbox keeps the viewport pinned to the latest message.
+- Auto-refresh checkbox adds/removes the meta refresh tag (1s reload cadence). Disable it for manual observation or debugging animations.
+
+## Performance Notes
+- Only the newest N messages (constant in `Program.cs`) are scanned each poll.
+- HTML is atomically rewritten each accepted batch.
+- Short animation durations ensure visibility between refreshes; toggle auto-refresh off for longer effect inspection.
+
+## Extending Effects
+1. Add new command to effect extraction regex in `SpamFilter` (MessageHelper.cs).  
+2. Add CSS keyframes + class in `HtmlFileChatView`.  
+3. Update `applyChatEffect` JS map if you want runtime retriggering.  
+4. (Optional) Wrap characters if per-letter animation is required.
+
+## Error Handling
+- Page reload on detected Pump.fun client-side exception banner.
+- Safe try/catch around DOM operations (skips transient failures).
+
+## Disclaimer
+For educational / personal overlay usage. Pump.fun DOM changes may break selectors; adjust locators if that happens.
+
+---
+PRs / suggestions welcome. Enjoy cleaner and more expressive chat overlays. 🚀
