@@ -1,10 +1,11 @@
 using System;
 using System.IO;
 using FluentAssertions;
-using kind_of_stop_spam;
+using Modatrix;
+using Modatrix.Tests;
 using Xunit;
 
-namespace KindOfStopSpam.Tests
+namespace Modatrix.Tests
 {
     public class HtmlFileChatViewTests
     {

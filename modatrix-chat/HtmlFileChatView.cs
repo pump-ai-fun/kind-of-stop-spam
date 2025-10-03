@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 
-namespace kind_of_stop_spam
+namespace Modatrix
 {
     /// <summary>
     /// Maintains a rolling list of accepted chat messages and writes them to a local HTML file.

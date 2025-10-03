@@ -1,8 +1,9 @@
 using System;
 using System.IO;
-using kind_of_stop_spam;
+using Modatrix;
+using Modatrix.Tests;
 
-namespace KindOfStopSpam.Tests
+namespace Modatrix.Tests
 {
     /// <summary>
     /// Utility methods used by tests to run the filter against a test dump file.

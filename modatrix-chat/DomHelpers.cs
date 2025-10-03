@@ -1,6 +1,6 @@
 ﻿using Microsoft.Playwright;
 
-namespace kind_of_stop_spam
+namespace Modatrix
 {
     /// <summary>
     /// DOM helper utilities for Playwright interactions.

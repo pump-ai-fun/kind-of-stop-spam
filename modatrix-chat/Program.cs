@@ -1,4 +1,4 @@
-﻿using kind_of_stop_spam;
+﻿using Modatrix;
 using Microsoft.Playwright;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -118,6 +118,13 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
         var headlessScrape = !settings.SessionMode;
         StaticFileServer? server = null;
 
+        // Early guidance: if not in session capture mode and sessions.data missing, instruct user.
+        if (!settings.SessionMode && !File.Exists("./sessions.data"))
+        {
+            AnsiConsole.MarkupLine("[red]Missing session file './sessions.data'.[/] Run once with: [yellow]PumpFunTool run --token {token} --session[/] to capture login, then re-run without --session.");
+            return 1;
+        }
+
         try
         {
             using var playwright = await Playwright.CreateAsync();
@@ -165,8 +172,16 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
                 }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLine($"[red]Failed to start static server[/]: {Markup.Escape(ex.Message)}");
-                    await SetupViewerPage(playwright, url: GetFileUrl(), verbose: settings.Verbose);
+                    if (ex.Message.Contains("storage state file", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AnsiConsole.MarkupLine("[red]Missing './sessions.data'.[/] Run once with --session to capture a browsing context before using viewer / moderation features.");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[red]Failed launching viewer (server or page)\n[/]{Markup.Escape(ex.Message)}");
+                    }
+                    // Fallback to file:// mode
+                    try { await SetupViewerPage(playwright, url: GetFileUrl(), verbose: settings.Verbose); } catch { }
                 }
             }
 
@@ -180,11 +195,14 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
             long acceptedTotal = 0;
             long droppedTotal = 0;
             var swStats = Stopwatch.StartNew();
+            int lastStatusLen = 0; // for in-place status updates
 
             while (true)
             {
                 if (Console.KeyAvailable)
                 {
+                    // finalize status line with newline before exiting
+                    Console.WriteLine();
                     Console.ReadKey(intercept: true);
                     AnsiConsole.MarkupLine("[yellow]Stopping (key press) ...[/]");
                     break;
@@ -208,6 +226,7 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
                 }
                 catch (Exception ex)
                 {
+                    Console.WriteLine(); // reset status line
                     AnsiConsole.MarkupLine($"[red]Reloading stream page[/]: {Markup.Escape(ex.Message)}");
                     await streamPage.ReloadAsync();
                     await LoadChat(streamPage, settings.Verbose);
@@ -261,7 +280,10 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
                             acceptedThisLoop++;
                             acceptedTotal++;
                             if (settings.Verbose)
+                            {
+                                Console.WriteLine(); // move past status line so verbose output doesn't overwrite
                                 AnsiConsole.MarkupLine($"[green]+[/] {Markup.Escape(accepted.User)}: {Markup.Escape(accepted.Content)}");
+                            }
                         }
                         else
                         {
@@ -273,6 +295,7 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
 
                 if (historicalPhase)
                 {
+                    Console.WriteLine();
                     historicalPhase = false;
                     historicalIds.Clear();
                     AnsiConsole.MarkupLine("[cyan]Historical backlog ingested → live strict filtering[/]");
@@ -280,7 +303,18 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
 
                 if (swStats.ElapsedMilliseconds >= 2000)
                 {
-                    AnsiConsole.MarkupLine($"[grey]loop: seen={seenThisLoop} accepted+={acceptedThisLoop} totalAccepted={acceptedTotal} dropped={droppedTotal}[/]");
+                    if (settings.Verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[grey]loop: seen={seenThisLoop} accepted+={acceptedThisLoop} totalAccepted={acceptedTotal} dropped={droppedTotal}[/]");
+                    }
+                    else
+                    {
+                        var statusPlain = $"loop: seen={seenThisLoop} accepted+={acceptedThisLoop} totalAccepted={acceptedTotal} dropped={droppedTotal}";
+                        // pad to overwrite previous longer content
+                        var padded = statusPlain.PadRight(lastStatusLen);
+                        Console.Write($"\r{padded}");
+                        lastStatusLen = padded.Length;
+                    }
                     swStats.Restart();
                 }
 

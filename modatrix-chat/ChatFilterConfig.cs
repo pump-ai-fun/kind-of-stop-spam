@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 
-namespace kind_of_stop_spam
+namespace Modatrix
 {
     /// <summary>
     /// Configuration container for filtering (keywords, mentions, wallet icon mapping).

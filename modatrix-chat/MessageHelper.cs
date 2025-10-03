@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace kind_of_stop_spam
+namespace Modatrix
 {
     /// <summary>
     /// Immutable representation of a filtered chat message.
