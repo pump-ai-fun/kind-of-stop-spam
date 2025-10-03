@@ -9,18 +9,22 @@ namespace kind_of_stop_spam
     /// <summary>
     /// Maintains a rolling list of accepted chat messages and writes them to a local HTML file.
     /// Supports effect classes for animated commands.
+    /// Now uses a fragment + polling approach (no full-page meta refresh) to avoid flicker.
     /// </summary>
     public sealed class HtmlFileChatView : IDisposable
     {
         private readonly object _lock = new();
         private readonly List<ChatMessage> _messages = new();
         private readonly int _capacity;
-        private readonly string _filePath;
+        private readonly string _filePath;              // Viewer page (static shell)
+        private readonly string _fragmentPath;          // Fragment file with just <li> elements
         private readonly string _title;
+        private int _counter;                           // simple incremental for unique keys
 
         public HtmlFileChatView(string filePath = "filtered.html", int capacity = 50, string? title = null)
         {
             _filePath = filePath;
+            _fragmentPath = Path.ChangeExtension(_filePath, ".fragment.html");
             _capacity = Math.Max(10, capacity);
             _title = title ?? "Filtered Chat";
             var dir = Path.GetDirectoryName(Path.GetFullPath(_filePath));
@@ -60,11 +64,57 @@ namespace kind_of_stop_spam
             return sb.ToString();
         }
 
+        /// <summary>
+        /// Writes (1) the fragment file containing only list items, and (2) the viewer page
+        /// (still re-written for test compatibility, but runtime updates happen via JS polling of the fragment).
+        /// </summary>
         private void WriteHtmlLocked()
         {
             var ordered = _messages.OrderBy(m => m.ReceivedAt).ToList();
-            var sb = new StringBuilder(48 * 1024);
-            sb.Append("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta id=\"autoRefresh\" http-equiv=\"refresh\" content=\"1\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>")
+
+            // Build fragment (<li> items only)
+            var frag = new StringBuilder(16 * 1024);
+            foreach (var m in ordered)
+            {
+                // unique stable-ish key: timestamp ticks + counter
+                var key = (m.ReceivedAt.UtcTicks.ToString("x") + "-" + (++_counter).ToString());
+                var whenLocal = m.ReceivedAt.ToLocalTime().ToString("HH:mm:ss");
+                var timeDisplay = !string.IsNullOrWhiteSpace(m.RawTime) ? m.RawTime : whenLocal;
+                string style = string.Empty;
+                if (!string.IsNullOrWhiteSpace(m.HighlightColor) && !string.IsNullOrWhiteSpace(m.HighlightColor2))
+                    style = $" style=\"background:linear-gradient(135deg,{HtmlEncode(m.HighlightColor!)},{HtmlEncode(m.HighlightColor2!)});\"";
+                else if (!string.IsNullOrWhiteSpace(m.HighlightColor))
+                    style = $" style=\"background:{HtmlEncode(m.HighlightColor!)};\"";
+
+                string effectClasses = string.Join(' ', m.Effects.Where(e => !string.IsNullOrWhiteSpace(e)));
+                var liClass = string.IsNullOrWhiteSpace(effectClasses) ? "msg" : $"msg {effectClasses}";
+
+                frag.Append("  <li class=\"").Append(liClass).Append("\" data-k=\"").Append(key).Append("\"")
+                    .Append(style).Append(">\n");
+                frag.Append("    <div><span class=\"time\">[").Append(HtmlEncode(timeDisplay ?? whenLocal)).Append("]</span>");
+                if (!string.IsNullOrWhiteSpace(m.Icon))
+                    frag.Append("<span class=\"icon\">").Append(HtmlEncode(m.Icon)).Append("</span>");
+                frag.Append("<span class=\"user\">").Append(HtmlEncode(m.User)).Append("</span></div>\n");
+
+                if (!string.IsNullOrWhiteSpace(m.ReplyTo))
+                {
+                    var reply = HtmlEncode(m.ReplyTo!);
+                    if (reply.Length > 200) reply = reply.Substring(0, 200) + "…";
+                    var replyContent = Linkify(reply);
+                    frag.Append("    <div class=\"reply\"><span class=\"reply-label\">Replying to</span> <span class=\"reply-text\">")
+                        .Append(replyContent).Append("</span></div>\n");
+                }
+
+                var rawContent = HtmlEncode(m.Content);
+                var finalContent = WrapCharsIfNeeded(m, rawContent);
+                frag.Append("    <div class=\"content\" data-text=\"").Append(rawContent).Append("\">")
+                    .Append(finalContent).Append("</div>\n  </li>\n");
+            }
+            WriteTextAtomic(_fragmentPath, frag.ToString(), Encoding.UTF8);
+
+            // Build viewer shell (full page; list populated from fragment after load). We still embed current items for compatibility/tests.
+            var sb = new StringBuilder(64 * 1024);
+            sb.Append("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>")
               .Append(HtmlEncode(_title)).Append("</title>\n<style>\n");
             sb.Append("  :root{color-scheme: dark light;}\nhtml,body{min-width:0;}\nbody{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:12px;background:#0b0b0c;color:#e9e9ea;}\n");
             sb.Append("  .wrap{max-width:900px;margin:0 auto;}\nh1{font-size:18px;font-weight:600;margin:0 0 8px;color:#9dd3ff;}\n.meta{color:#9aa0a6;font-size:12px;margin-bottom:12px;}\n");
@@ -84,73 +134,61 @@ namespace kind_of_stop_spam
             sb.Append("  .shake{animation:shake .45s cubic-bezier(.36,.07,.19,.97) 0s 1 both,flash .45s ease-in-out 0s 1;}@keyframes shake{0%{transform:translate(0,0) rotate(0);}10%{transform:translate(-14px,-8px) rotate(-4deg);}20%{transform:translate(16px,10px) rotate(4deg);}30%{transform:translate(-18px,12px) rotate(-5deg);}40%{transform:translate(18px,-12px) rotate(5deg);}50%{transform:translate(-14px,10px) rotate(-4deg);}60%{transform:translate(14px,-10px) rotate(4deg);}70%{transform:translate(-10px,6px) rotate(-3deg);}80%{transform:translate(10px,-6px) rotate(3deg);}90%{transform:translate(-6px,4px) rotate(-2deg);}100%{transform:translate(0,0) rotate(0);}}@keyframes flash{0%,100%{box-shadow:0 0 0 0 rgba(255,255,255,0);}50%{box-shadow:0 0 24px 8px rgba(255,255,255,.55);}}\n");
             sb.Append("  .time{color:#a1a1a6;font-size:12px;margin-right:8px;} .user{font-weight:600;color:#b6f09c;} .content{margin-top:6px;white-space:pre-wrap;word-wrap:break-word;overflow-wrap:anywhere;word-break:break-word;}\n");
             sb.Append("  .toggle{user-select:none;cursor:pointer;margin-right:18px;} .toggle input{vertical-align:middle;margin-right:6px;} .controls{display:flex;flex-wrap:wrap;gap:22px;align-items:center;margin-top:10px;font-size:12px;color:#9aa0a6;}\n");
-            sb.Append("  .reply{margin-top:6px;padding:6px 8px;background:#0f1114;border-left:3px solid #3a70d6;color:#aeb4bb;font-size:12px;border-radius:6px;overflow-wrap:anywhere;word-break:break-word;} .reply .reply-label{color:#8ab4f8;font-weight:600;margin-right:4px;}");
-            // Override glow so it affects only the inner text, not the whole message box
-            sb.Append("  .glow{box-shadow:none!important;} .glow .content{animation:textGlow .8s ease-in-out infinite;}@keyframes textGlow{0%,100%{text-shadow:0 0 2px rgba(0,255,255,.25),0 0 6px rgba(0,255,255,.20);}50%{text-shadow:0 0 4px rgba(0,255,255,.95),0 0 12px rgba(0,255,255,.80),0 0 22px rgba(0,255,255,.65);}}");
-            // Added final overrides for user-requested tuning
-            sb.Append("  /* overrides */\\n  .wiggle{animation:wiggle 1.4s ease-in-out infinite !important;}\\n  .wave .ch{animation:wave 2s ease-in-out infinite !important;}\\n  @keyframes wave{0%,100%{transform:translateY(0);}20%{transform:translateY(-14px);}40%{transform:translateY(0);}60%{transform:translateY(12px);}80%{transform:translateY(0);}}\\n  .glow .content{animation:textGlow 1s ease-in-out infinite !important;}\\n  @keyframes textGlow{0%,100%{text-shadow:0 0 4px rgba(0,255,255,.45),0 0 10px rgba(0,255,255,.25);}50%{text-shadow:0 0 8px rgba(0,255,255,.95),0 0 22px rgba(0,255,255,.85),0 0 38px rgba(0,255,255,.75),0 0 54px rgba(0,255,255,.55);}}\\n");
-            sb.Append("</style>\\n</head>\\n<body data-msg-count=\"")
-              .Append(ordered.Count.ToString()).Append("\">\n<div class=\"wrap\">\n");
-            sb.Append("<h1>").Append(HtmlEncode(_title)).Append("</h1>\n<div class=\"meta\">Auto-refreshing (toggle below) | Messages: ")
-              .Append(ordered.Count.ToString()).Append("</div>\n<ul>\n");
-
-            foreach (var m in ordered)
-            {
-                var whenLocal = m.ReceivedAt.ToLocalTime().ToString("HH:mm:ss");
-                var timeDisplay = !string.IsNullOrWhiteSpace(m.RawTime) ? m.RawTime : whenLocal;
-                string style = string.Empty;
-                if (!string.IsNullOrWhiteSpace(m.HighlightColor) && !string.IsNullOrWhiteSpace(m.HighlightColor2))
-                    style = $" style=\"background:linear-gradient(135deg,{HtmlEncode(m.HighlightColor!)},{HtmlEncode(m.HighlightColor2!)});\"";
-                else if (!string.IsNullOrWhiteSpace(m.HighlightColor))
-                    style = $" style=\"background:{HtmlEncode(m.HighlightColor!)};\"";
-
-                string effectClasses = string.Join(' ', m.Effects.Where(e => !string.IsNullOrWhiteSpace(e)));
-                var liClass = string.IsNullOrWhiteSpace(effectClasses) ? "msg" : $"msg {effectClasses}";
-
-                sb.Append("  <li class=\"").Append(liClass).Append("\"").Append(style).Append(">\n");
-                sb.Append("    <div><span class=\"time\">[").Append(HtmlEncode(timeDisplay ?? whenLocal)).Append("]</span>");
-                if (!string.IsNullOrWhiteSpace(m.Icon))
-                    sb.Append("<span class=\"icon\">").Append(HtmlEncode(m.Icon)).Append("</span>");
-                sb.Append("<span class=\"user\">").Append(HtmlEncode(m.User)).Append("</span></div>\n");
-
-                if (!string.IsNullOrWhiteSpace(m.ReplyTo))
-                {
-                    var reply = HtmlEncode(m.ReplyTo!);
-                    if (reply.Length > 200) reply = reply.Substring(0, 200) + "…";
-                    var replyContent = Linkify(reply);
-                    sb.Append("    <div class=\"reply\"><span class=\"reply-label\">Replying to</span> <span class=\"reply-text\">")
-                      .Append(replyContent).Append("</span></div>\n");
-                }
-
-                var rawContent = HtmlEncode(m.Content);
-                var finalContent = WrapCharsIfNeeded(m, rawContent);
-                sb.Append("    <div class=\"content\" data-text=\"").Append(rawContent).Append("\">").Append(finalContent).Append("</div>\n  </li>\n");
-            }
-
-            sb.Append("</ul>\n<div id=\"_bottom\"></div>\n<div class=\"controls\">\n  <label class=\"toggle\"><input type=\"checkbox\" id=\"autoScrollToggle\" checked> Auto-scroll</label>\n  <label class=\"toggle\"><input type=\"checkbox\" id=\"autoRefreshToggle\" checked> Auto-refresh (1s)</label>\n</div>\n");
+            sb.Append("  .reply{margin-top:6px;padding:6px 8px;background:#0f1114;border-left:3px solid #3a70d6;color:#aeb4bb;font-size:12px;border-radius:6px;overflow-wrap:anywhere;word-break:break-word;} .reply .reply-label{color:#8ab4f8;font-weight:600;margin-right:4px;}\n");
+            sb.Append("  .glow{box-shadow:none!important;} .glow .content{animation:textGlow .8s ease-in-out infinite;}@keyframes textGlow{0%,100%{text-shadow:0 0 2px rgba(0,255,255,.25),0 0 6px rgba(0,255,255,.20);}50%{text-shadow:0 0 4px rgba(0,255,255,.95),0 0 12px rgba(0,255,255,.80),0 0 22px rgba(0,255,255,.65);}}\n");
+            sb.Append("  /* overrides */\n  .wiggle{animation:wiggle 1.4s ease-in-out infinite !important;}\n  .wave .ch{animation:wave 2s ease-in-out infinite !important;}\n  @keyframes wave{0%,100%{transform:translateY(0);}20%{transform:translateY(-14px);}40%{transform:translateY(0);}60%{transform:translateY(12px);}80%{transform:translateY(0);}}\n  .glow .content{animation:textGlow 1s ease-in-out infinite !important;}\n  @keyframes textGlow{0%,100%{text-shadow:0 0 4px rgba(0,255,255,.45),0 0 10px rgba(0,255,255,.25);}50%{text-shadow:0 0 8px rgba(0,255,255,.95),0 0 22px rgba(0,255,255,.85),0 0 38px rgba(0,255,255,.75),0 0 54px rgba(0,255,255,.55);}}\n");
+            sb.Append("</style>\n</head>\n<body data-msg-count=\"")
+              .Append(ordered.Count.ToString()).Append("\" data-capacity=\"").Append(_capacity).Append("\">\n<div class=\"wrap\">\n");
+            sb.Append("<h1>").Append(HtmlEncode(_title)).Append("</h1>\n<div class=\"meta\">Live (polled) | Messages: ")
+              .Append(ordered.Count.ToString()).Append("</div>\n<ul id=\"chatList\">\n")
+              .Append(frag.ToString()) // embed current list so initial load shows messages immediately
+              .Append("</ul>\n<div id=\"_bottom\"></div>\n<div class=\"controls\">\n  <label class=\"toggle\"><input type=\"checkbox\" id=\"autoScrollToggle\" checked> Auto-scroll</label>\n  <label class=\"toggle\"><input type=\"checkbox\" id=\"autoRefreshToggle\" checked> Auto-refresh (poll)</label>\n</div>\n");
 
             var script = @"<script>
 (function(){
+  const FRAGMENT = '" + Path.GetFileName(_fragmentPath) + @"';
+  const POLL_MS = 1000;
   const SC_KEY='filteredChat.autoScroll';
   const RF_KEY='filteredChat.autoRefresh';
   const autoScrollCb=document.getElementById('autoScrollToggle');
   const autoRefreshCb=document.getElementById('autoRefreshToggle');
-  const metaId='autoRefresh';
-  function setMeta(on){let m=document.getElementById(metaId); if(on){ if(!m){ m=document.createElement('meta'); m.id=metaId; m.httpEquiv='refresh'; m.content='1'; document.head.appendChild(m);} } else if(m){ m.remove(); }}
-  function scrollBottom(){ if(!autoScrollCb.checked) return; const b=document.getElementById('_bottom'); if(b&&b.scrollIntoView) b.scrollIntoView({block:'end'}); else window.scrollTo(0,document.body.scrollHeight); }
-  // Load stored states
+  const list=document.getElementById('chatList');
+  function scrollBottom(force){ if(force || autoScrollCb.checked){ const b=document.getElementById('_bottom'); b?.scrollIntoView({block:'end'}); }}
   const scStored=localStorage.getItem(SC_KEY); autoScrollCb.checked = scStored===null?true:scStored==='1';
-  const rfStored=localStorage.getItem(RF_KEY); autoRefreshCb.checked = rfStored===null?true:rfStored==='1'; setMeta(autoRefreshCb.checked);
-  autoScrollCb.addEventListener('change',()=>{localStorage.setItem(SC_KEY, autoScrollCb.checked?'1':'0'); if(autoScrollCb.checked) scrollBottom();});
-  autoRefreshCb.addEventListener('change',()=>{localStorage.setItem(RF_KEY, autoRefreshCb.checked?'1':'0'); setMeta(autoRefreshCb.checked);});
-  // Character effect setup (stagger + explode vectors)
-  document.querySelectorAll('.wave .ch, .scramble .ch, .matrix .ch, .explode .ch, .type .ch').forEach((el,i)=>{el.style.animationDelay=(i*0.03)+'s'; if(el.closest('.explode')){const ang=(i*137)%360; const r=55+(i%7)*5; const rad=ang*Math.PI/180; el.style.setProperty('--dx',Math.cos(rad)*r+'px'); el.style.setProperty('--dy',Math.sin(rad)*r+'px');}});
-  // Randomize phase so loops look mid-motion
-  document.querySelectorAll('.wiggle,.glow,.wave,.matrix').forEach(el=>{el.style.animationDelay=('-'+(Math.random()*1).toFixed(2)+'s');});
-  function scrambleChars(root){const ch=[...root.querySelectorAll('.scramble .ch')]; if(!ch.length) return; const original=ch.map(x=>x.textContent); const glyphs='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*'; let n=0; const id=setInterval(()=>{n++; ch.forEach(c=>{c.textContent=glyphs[Math.floor(Math.random()*glyphs.length)];}); if(n>10){ clearInterval(id); ch.forEach((c,i)=>c.textContent=original[i]); }},40);} scrambleChars(document);
-  window.applyChatEffect=function(command, element){ if(!element) return; const map={wiggle:'wiggle',glow:'glow',wave:'wave',scramble:'scramble',type:'type',glitch:'glitch',explode:'explode',matrix:'matrix',fade:'fade',slide:'slide',shake:'shake'}; const cls=map[command?.toLowerCase()]; if(!cls) return; element.classList.remove(cls); void element.offsetWidth; element.classList.add(cls,'effect-active'); const once=()=>{element.classList.remove('effect-active'); element.removeEventListener('animationend',once);}; element.addEventListener('animationend',once); if(['wave','scramble','matrix','explode','type'].includes(cls)){ if(!element.querySelector('.ch')){ const txt=element.textContent||''; element.textContent=''; [...txt].forEach((c,i)=>{ const span=document.createElement('span'); span.className='ch'; span.dataset.i=i; span.textContent=c; element.appendChild(span);}); } element.querySelectorAll('.ch').forEach((el,i)=>{el.style.animationDelay=(i*0.03)+'s'; if(cls==='explode'){const ang=(i*137)%360; const r=55+(i%7)*5; const rad=ang*Math.PI/180; el.style.setProperty('--dx',Math.cos(rad)*r+'px'); el.style.setProperty('--dy',Math.sin(rad)*r+'px');}}); if(cls==='scramble') scrambleChars(element); } if(autoScrollCb.checked) scrollBottom(); };
-  // Initial scroll
-  scrollBottom();
+  const rfStored=localStorage.getItem(RF_KEY); autoRefreshCb.checked = rfStored===null?true:rfStored==='1';
+  autoScrollCb.addEventListener('change',()=>localStorage.setItem(SC_KEY, autoScrollCb.checked?'1':'0'));
+  autoRefreshCb.addEventListener('change',()=>localStorage.setItem(RF_KEY, autoRefreshCb.checked?'1':'0'));
+
+  function applyPerCharEffects(root){
+    root.querySelectorAll('.wave .ch, .scramble .ch, .matrix .ch, .explode .ch, .type .ch').forEach((el,i)=>{el.style.animationDelay=(i*0.03)+'s'; if(el.closest('.explode')){const ang=(i*137)%360; const r=55+(i%7)*5; const rad=ang*Math.PI/180; el.style.setProperty('--dx',Math.cos(rad)*r+'px'); el.style.setProperty('--dy',Math.sin(rad)*r+'px');}});
+    root.querySelectorAll('.wiggle,.glow,.wave,.matrix').forEach(el=>{el.style.animationDelay=('-'+(Math.random()*1).toFixed(2)+'s');});
+  }
+  applyPerCharEffects(document);
+
+  async function poll(){
+    if(!autoRefreshCb.checked){ setTimeout(poll,POLL_MS); return; }
+    try {
+      const resp = await fetch(FRAGMENT + '?t=' + Date.now(), {cache:'no-store'});
+      if(!resp.ok) throw 0;
+      const txt = await resp.text();
+      const tmp = document.createElement('div');
+      tmp.innerHTML = txt;
+      const existing = new Set(Array.from(list.querySelectorAll('li.msg')).map(li=>li.getAttribute('data-k')));
+      const toAdd=[];
+      tmp.querySelectorAll('li.msg').forEach(li=>{const k=li.getAttribute('data-k'); if(k && !existing.has(k)) toAdd.push(li);});
+      if(toAdd.length){
+        toAdd.forEach(li=>list.appendChild(li));
+        applyPerCharEffects({querySelectorAll:(sel)=>list.querySelectorAll(sel)});
+        // prune if > capacity
+        const cap = parseInt(document.body.getAttribute('data-capacity')||'" + _capacity + @"',10);
+        while(list.children.length>cap) list.removeChild(list.firstElementChild);
+        scrollBottom();
+      }
+    } catch(e) { /* swallow */ }
+    setTimeout(poll,POLL_MS);
+  }
+  poll();
+  scrollBottom(true);
 })();
 </script>";
             sb.Append(script);
