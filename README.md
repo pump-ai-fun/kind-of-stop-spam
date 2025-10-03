@@ -1,4 +1,4 @@
-﻿# Modatrix (the start of a Local Chat Moderation)
+﻿# Modatrix PumpFun Chat Filter / Overlay
 
 ![Demo GIF](./banner.jpg)
 
@@ -27,53 +27,46 @@ The filter scans incoming chat logs, removes repetitive spam, and outputs a clea
 
 ## Quick start
 1. Clone and build:
-   ```
-   dotnet build
-   ```
-2. (Optional) Create a filter config at repo root (chat-filter-cfg.json):
-   ```json
-   {
-     "BannedKeywords": ["rug", "scam"],
-     "BannedMentions": ["@rugdefs", "@spammer"]
-   }
-   ```
-3. Capture a session (once) so you can run headless:
-   ```
-   dotnet run --project ./kind-of-stop-spam -- run --token <token_address> --session
-   ```
-   Log in manually; tool waits up to 5 min, saves `./sessions.data` and exits.
-4. Run headless filtering mode:
-   ```
-   dotnet run --project ./kind-of-stop-spam -- run --token <token_address>
-   ```
-5. Add `filtered-chat.html` as a Browser Source in OBS.
-
-Example token:
 ```
-2McSmYfSEKUMQEq4JZbb9wq2SeyLrxkd9831EB9Vpump
+dotnet build
 ```
 
-### Updated CLI (Spectre.Console)
+## 1. Capture Session (one time)
+You need an authenticated storage state (`sessions.data`).
 ```
-run --token <token> [--config ./chat-filter-cfg.json] [--session] [--verbose]
+dotnet run --project modatrix-chat -- run --token <tokenAddressPumpSuffix> --session
 ```
-- `--session` : interactive login & session capture (non-headless)
-- `--verbose` : echo each accepted message to console
+A browser opens; log in and wait until chat loads. When you see the tool message about session saved, close it. `sessions.data` appears in the working directory.
 
-## Architecture (Fragment + Polling)
-Previous meta-refresh approach caused flicker. Now:
-- `HtmlFileChatView` writes a stable shell `filtered-chat.html` once (and on updates for safety) + a rolling `filtered-chat.fragment.html` containing only `<li>` message nodes.
-- Client JS (in shell) polls the fragment every second, diffs new `data-k` keys, appends without reloading the page.
-- Existing nodes retain animation state; one-shot / looping CSS effects remain smooth.
+## 2. Normal Headless Run (generates + updates overlay)
+```
+dotnet run --project modatrix-chat -- run --token <tokenAddressPumpSuffix>
+```
+Artifacts generated / updated:
+- `filtered-chat.html` (viewer shell)
+- `filtered-chat.fragment.html` (polled fragment – prevents flicker)
 
-## Filtering Phases
-| Phase | Dedup | Rate Limit | Banned Words | Purpose |
-|-------|-------|------------|--------------|---------|
-| Historical | No | No | Yes | Initial backlog context |
-| Live | Yes | Yes | Yes | Real-time cleanliness |
+Add `filtered-chat.html` as an OBS Browser Source (local file) OR use the static server via `--show-viewer`.
 
-## Chat Command Effects
-Add one or more anywhere in a message (removed before display; multiple stack):
+## 3. Interactive Viewer (local static server)
+```
+dotnet run --project modatrix-chat -- run --token <token> --show-viewer
+```
+Starts a tiny `HttpListener` server (default `http://localhost:17999/filtered-chat.html`) and opens a Chromium window. Point OBS to that URL if preferred.
+
+---
+## CLI Reference
+Command name: `PumpFunTool run`
+
+Required:
+- `--token <TOKEN>`  Pump.fun token address (20–50 base58 chars + `pump` suffix). Example: `5Yabc...xyzpump`
+
+Optional:
+- `--config <PATH>`  Path to chat filter config JSON (default `./chat-filter-cfg.json`)
+- `--session`        Session capture mode (interactive login then exit)
+- `--verbose`        Verbose diagnostics (log each accepted message line-by-line)
+- `--show-viewer`    Launch embedded viewer + start local static server
+- `--port <PORT>`    Port for static server (default 17999; only meaningful with `--show-viewer`)
 
 | Command | Effect |
 |---------|--------|
@@ -91,57 +84,43 @@ Add one or more anywhere in a message (removed before display; multiple stack):
 
 Example:
 ```
-We live !glow !wave #ff8800 #2200ff
+dotnet run --project modatrix-chat -- run --token <token>
 ```
-
-## Color Highlights
-Include up to two hex colors (`#abc / #aabbcc`) to style message background (solid or gradient). Removed from final text.
-
-## Replies
-Reply chains detected and a snippet (trimmed) is shown above the message content.
-
-## Config (`chat-filter-cfg.json`)
-```json
-{
-  "BannedKeywords": ["scam"],
-  "BannedMentions": ["@annoyinguser"],
-  "WalletIcons": { "@coolwhale": "🐳", "@hq3xqa": "🔥" }
-}
-```
-
-## Build & Run Summary
-```
-dotnet build
-dotnet run --project kind-of-stop-spam -- run --token <token> [--config path] [--session] [--verbose]
-```
-
-## Generated Artifacts
-| File | Purpose |
-|------|---------|
-| `filtered-chat.html` | Static shell overlay (polls fragment) |
-| `filtered-chat.fragment.html` | Latest message `<li>` nodes only |
-| `sessions.data` | Playwright storage state (login reuse) |
-
-## Overlay Controls
-- Auto-scroll toggle keeps viewport pinned to newest message.
-- Auto-refresh toggle controls fragment polling (1s cadence).
-
-## Performance Notes
-- Only newest N DOM messages scanned per interval.
-- Atomic fragment write prevents partially-read HTML.
-- Character-wrapped effects only for commands that need per-letter animation.
-
-## Extending Effects
-1. Add token to `_effectTokenRegex` in `MessageHelper.cs`.
-2. Define CSS keyframes / class in `HtmlFileChatView`.
-3. (Optional) Add per-character wrapping if needed.
-
-## Error Handling
-- Automatic page reload on Pump.fun client-side exception banner.
-- Per-message try/catch isolation.
-
-## Disclaimer
-Local-only mirror. DOM changes upstream may require selector adjustments.
+Exit any running session by pressing any key in the console window.
 
 ---
-PRs / suggestions welcome. Enjoy cleaner, expressive chat overlays. 🚀
+## Config File (`chat-filter-cfg.json`)
+Shape (all properties optional):
+```json
+{
+  "bannedKeywords": ["scam", "rug"],
+  "bannedMentions": ["@baduser"],
+  "walletIcons": {"@friendly": "🤝", "@devteam": "🛠️"}
+}
+```
+Notes:
+- Matching is case‑insensitive substring.
+- Mentions match as substrings; `@` prefix auto-normalized.
+- `walletIcons` maps a (normalized) user tag to an emoji / glyph shown before the username.
+
+---
+## Effects (Animated Message Classes)
+Internally some messages may include effect class names: `wave`, `scramble`, `explode`, `matrix`, `type`, `wiggle`, `glow`, `shake`, `slide`, `fade`, `glitch`. These trigger per‑character / element animations in the overlay. (Not a public user command API yet.)
+
+---
+## Generated Files
+- `filtered-chat.html`  Main overlay page (includes JS that polls fragment)
+- `filtered-chat.fragment.html`  List `<li>` items only; updated each accepted message
+- `sessions.data`  Persisted authenticated storage state (required for non-session runs)
+
+---
+## Troubleshooting
+- Missing session: Run once with `--session` to create `sessions.data`.
+- Token format error: Ensure base58 + `pump` suffix (regex validated).
+- No messages / timeout: Login likely not captured; re-run with `--session`.
+- Port conflict: Supply a different `--port` when using `--show-viewer`.
+- OBS not updating: Ensure Auto-refresh checkbox (in viewer) is checked OR OBS cache disabled.
+
+---
+## License
+MIT (see repository). Contributions welcome.
