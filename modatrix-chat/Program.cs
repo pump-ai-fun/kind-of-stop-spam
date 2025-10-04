@@ -83,7 +83,7 @@ internal sealed class StaticFileServer : IAsyncDisposable
         try
         {
             var rel = ctx.Request.Url?.AbsolutePath.TrimStart('/') ?? string.Empty;
-            if (string.IsNullOrEmpty(rel)) rel = "filtered-chat.html"; // default document
+            if (string.IsNullOrEmpty(rel)) rel = "filtered-chat.html";
             var full = Path.Combine(_root, rel.Replace('/', Path.DirectorySeparatorChar));
             if (!File.Exists(full)) { ctx.Response.StatusCode = 404; ctx.Response.Close(); return; }
             var bytes = File.ReadAllBytes(full);
@@ -117,6 +117,12 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
         var token = settings.Token.Trim();
         var headlessScrape = !settings.SessionMode;
         StaticFileServer? server = null;
+
+        // Global processed id set (persists across historical + live phases)
+        var seenMessageIds = new HashSet<string>(StringComparer.Ordinal);
+
+        // Historical phase flag: first ingestion window (relaxed filtering)
+        bool historicalPhase = true;
 
         // Early guidance: if not in session capture mode and sessions.data missing, instruct user.
         if (!settings.SessionMode && !File.Exists("./sessions.data"))
@@ -189,9 +195,6 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
             await LoadChat(streamPage, settings.Verbose);
             AnsiConsole.MarkupLine("[green]Historical phase start[/] (relaxed)");
 
-            bool historicalPhase = true;
-            var historicalIds = new HashSet<string>();
-            var liveIds = new HashSet<string>();
             long acceptedTotal = 0;
             long droppedTotal = 0;
             var swStats = Stopwatch.StartNew();
@@ -201,7 +204,6 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
             {
                 if (Console.KeyAvailable)
                 {
-                    // finalize status line with newline before exiting
                     Console.WriteLine();
                     Console.ReadKey(intercept: true);
                     AnsiConsole.MarkupLine("[yellow]Stopping (key press) ...[/]");
@@ -226,7 +228,7 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine(); // reset status line
+                    Console.WriteLine();
                     AnsiConsole.MarkupLine($"[red]Reloading stream page[/]: {Markup.Escape(ex.Message)}");
                     await streamPage.ReloadAsync();
                     await LoadChat(streamPage, settings.Verbose);
@@ -239,78 +241,74 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
                     continue;
                 }
 
-                int startAt = Math.Max(0, allMessagesCount - 23);
+                // Process only a tail window, but always in DOM (chronological) order so that earlier messages are appended first.
+                const int WindowSize = 60; // sufficient recent slice; DOM order: oldest -> newest
+                int startAt = Math.Max(0, allMessagesCount - WindowSize);
                 for (int idx = startAt; idx < allMessagesCount; idx++)
                 {
+                    ILocator node;
+                    string? msgId;
                     try
                     {
-                        var node = allMessages.Nth(idx);
-                        var msgId = await node.GetAttributeAsync("data-message-id");
-                        if (string.IsNullOrEmpty(msgId)) continue;
-                        seenThisLoop++;
+                        node = allMessages.Nth(idx);
+                        msgId = await node.GetAttributeAsync("data-message-id");
+                        if (string.IsNullOrEmpty(msgId) || seenMessageIds.Contains(msgId)) continue;
+                    }
+                    catch { continue; }
 
-                        if (historicalPhase)
-                        {
-                            if (!historicalIds.Add(msgId)) continue;
-                        }
-                        else if (liveIds.Contains(msgId)) continue;
+                    seenThisLoop++;
 
-                        var rawBlock = await node.InnerTextAsync(new LocatorInnerTextOptions { Timeout = 1500 });
+                    string rawBlock;
+                    try { rawBlock = await node.InnerTextAsync(new LocatorInnerTextOptions { Timeout = 1500 }); }
+                    catch { continue; }
 
-                        string? replyingTo = null;
-                        try
+                    string? replyingTo = null;
+                    try
+                    {
+                        var replySpans = node.Locator("span.leading-snug");
+                        var rc = await replySpans.CountAsync();
+                        if (rc > 0)
                         {
-                            var replySpans = node.Locator("span.leading-snug");
-                            var rc = await replySpans.CountAsync();
-                            if (rc > 0)
-                            {
-                                replyingTo = await replySpans.Nth(rc - 1).InnerTextAsync();
-                                var firstBreak = rawBlock.IndexOf('\n');
-                                if (firstBreak > 0 && firstBreak + 1 < rawBlock.Length)
-                                    rawBlock = rawBlock[(firstBreak + 1)..];
-                            }
-                        }
-                        catch { replyingTo = null; }
-
-                        var mode = historicalPhase ? SpamFilter.Mode.Historical : SpamFilter.Mode.Live;
-                        if (filter.TryAcceptRaw(rawBlock, replyingTo, mode, out var accepted))
-                        {
-                            if (!historicalPhase) liveIds.Add(msgId);
-                            view.Add(accepted); // triggers fragment rewrite
-                            acceptedThisLoop++;
-                            acceptedTotal++;
-                            if (settings.Verbose)
-                            {
-                                Console.WriteLine(); // move past status line so verbose output doesn't overwrite
-                                AnsiConsole.MarkupLine($"[green]+[/] {Markup.Escape(accepted.User)}: {Markup.Escape(accepted.Content)}");
-                            }
-                        }
-                        else
-                        {
-                            droppedTotal++;
+                            replyingTo = await replySpans.Nth(rc - 1).InnerTextAsync();
+                            var firstBreak = rawBlock.IndexOf('\n');
+                            if (firstBreak > 0 && firstBreak + 1 < rawBlock.Length)
+                                rawBlock = rawBlock[(firstBreak + 1)..];
                         }
                     }
-                    catch { /* ignore single message issues */ }
+                    catch { replyingTo = null; }
+
+                    var mode = historicalPhase ? SpamFilter.Mode.Historical : SpamFilter.Mode.Live;
+                    if (!filter.TryAcceptRaw(rawBlock, replyingTo, mode, out var accepted))
+                    {
+                        droppedTotal++;
+                        continue;
+                    }
+
+                    seenMessageIds.Add(msgId!);
+                    view.Add(accepted);
+                    acceptedThisLoop++;
+                    acceptedTotal++;
+                    if (settings.Verbose)
+                    {
+                        Console.WriteLine();
+                        AnsiConsole.MarkupLine($"[green]+[/] {Markup.Escape(accepted.User)}: {Markup.Escape(accepted.Content)}");
+                    }
                 }
 
                 if (historicalPhase)
                 {
                     Console.WriteLine();
-                    historicalPhase = false;
-                    historicalIds.Clear();
+                    historicalPhase = false; // after first ingestion
                     AnsiConsole.MarkupLine("[cyan]Historical backlog ingested → live strict filtering[/]");
                 }
 
                 if (swStats.ElapsedMilliseconds >= 2000)
                 {
                     if (settings.Verbose)
-                    {
                         AnsiConsole.MarkupLine($"[grey]loop: seen={seenThisLoop} accepted+={acceptedThisLoop} totalAccepted={acceptedTotal} dropped={droppedTotal}[/]");
-                    }
                     else
                     {
                         var statusPlain = $"loop: seen={seenThisLoop} accepted+={acceptedThisLoop} totalAccepted={acceptedTotal} dropped={droppedTotal}";
-                        // pad to overwrite previous longer content
                         var padded = statusPlain.PadRight(lastStatusLen);
                         Console.Write($"\r{padded}");
                         lastStatusLen = padded.Length;
@@ -331,6 +329,16 @@ public sealed class PumpFunCommand : AsyncCommand<PumpFunSettings>
             if (server != null) await server.DisposeAsync();
         }
         return 0;
+    }
+
+    private static int? ParseClockMinutes(string? hhmm)
+    {
+        if (string.IsNullOrWhiteSpace(hhmm)) return null;
+        if (hhmm.Length != 5 || hhmm[2] != ':') return null;
+        if (!int.TryParse(hhmm.AsSpan(0, 2), out var h)) return null;
+        if (!int.TryParse(hhmm.AsSpan(3, 2), out var m)) return null;
+        if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+        return h * 60 + m;
     }
 
     private static string GetFileUrl() => $"file:///{Path.GetFullPath("./filtered-chat.html").Replace("\\", "/")}";
